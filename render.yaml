@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: hcmusic-api
+    runtime: docker
+    plan: free
+    region: ohio
+    branch: master
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /docs
+    autoDeploy: true
