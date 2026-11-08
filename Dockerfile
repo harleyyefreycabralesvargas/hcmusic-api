@@ -4,8 +4,12 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Runtime JS que yt-dlp necesita para resolver los desafíos de YouTube (EJS).
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
+    && deno --version
 
 WORKDIR /app
 
