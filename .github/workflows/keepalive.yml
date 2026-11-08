@@ -1,0 +1,13 @@
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping API
+        run: curl -fsS --max-time 90 https://hcmusic-api.onrender.com/docs > /dev/null || true
