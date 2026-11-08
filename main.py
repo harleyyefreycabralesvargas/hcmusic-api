@@ -79,7 +79,7 @@ async def stream(id: str):
     def _resolve():
         url_completa = f"https://www.youtube.com/watch?v={id}"
         ydl_opts = {
-            "format": "bestaudio",
+            "format": "bestaudio/best",
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
