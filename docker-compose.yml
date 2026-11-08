@@ -1,0 +1,15 @@
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "8000"
+
+  # Túnel rápido de Cloudflare (sin cuenta, URL temporal que sale en los logs).
+  # Para URL fija con un dominio, mira las instrucciones del túnel con token.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - api
+    command: tunnel --no-autoupdate --protocol http2 --url http://api:8000

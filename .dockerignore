@@ -1,0 +1,10 @@
+__pycache__/
+*.log
+*.bat
+cloudflared.exe
+ngrok/
+.venv/
+hf-space/
+pasos_ngrok.txt
+dar_datos.txt
+url_actual.txt
