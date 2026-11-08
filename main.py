@@ -14,6 +14,10 @@ from yt_dlp import YoutubeDL
 
 app = FastAPI(title="Audio Público API")
 
+# Archivo de cookies de YouTube (formato Netscape). En Render se monta como Secret File.
+# Sin cookies, YouTube puede bloquear la IP del servidor ("confirm you're not a bot").
+COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE", "/etc/secrets/cookies.txt")
+
 # Modelo de respuesta del endpoint de búsqueda
 class SearchResult(BaseModel):
     id: str
@@ -70,6 +74,8 @@ async def stream(id: str):
             "no_warnings": True,
             "noplaylist": True,
         }
+        if os.path.isfile(COOKIES_FILE):
+            ydl_opts["cookiefile"] = COOKIES_FILE
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url_completa, download=False)
@@ -109,6 +115,8 @@ async def download(id: str):
             "noplaylist": True,
             "outtmpl": os.path.join(tmpdir, "%(title).120s.%(ext)s"),
         }
+        if os.path.isfile(COOKIES_FILE):
+            ydl_opts["cookiefile"] = COOKIES_FILE
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={id}", download=True)
