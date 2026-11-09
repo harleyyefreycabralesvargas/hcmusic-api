@@ -106,168 +106,11 @@ def _url_audio(info):
     return formats[-1].get("url") if formats else None
 
 
-def _url_hls(info):
-    """URL HLS de audio completo (SoundCloud solo entrega el audio completo por m3u8)."""
-    if not info:
-        return None
-    formats = [f for f in (info.get("formats") or []) if f.get("url")]
-    hls = [
-        f for f in formats
-        if "m3u8" in (f.get("url") or "") or str(f.get("protocol") or "").startswith("m3u8")
-    ]
-    if not hls:
-        return None
-    audio = [f for f in hls if f.get("vcodec") == "none"] or hls
-    return max(audio, key=lambda f: f.get("abr") or 0).get("url")
-
-
-def _sin_acentos(texto: str) -> str:
-    return (
-        unicodedata.normalize("NFKD", texto or "")
-        .encode("ascii", "ignore")
-        .decode()
-        .lower()
-    )
-
-
-def _normalizar(texto: str) -> str:
-    t = _sin_acentos(texto)
-    t = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", t)
-    t = re.sub(
-        r"\b(feat|ft|featuring|official|video|audio|lyric|lyrics|letra|hd|hq|remaster|remastered|topic|prod|by)\b",
-        " ",
-        t,
-    )
-    t = re.sub(r"[^a-z0-9]+", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-
-def _similitud(a: str, b: str) -> float:
-    ta = set(_normalizar(a).split())
-    tb = set(_normalizar(b).split())
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
-def _meta_youtube(video_id: str) -> dict:
-    """Título, autor y duración sin descargar el audio."""
-    clave = f"meta:{video_id}"
-    guardado = _cache_get(clave, _TTL_META)
-    if guardado:
-        return guardado
-    titulo = autor = ""
-    duracion = None
-    try:
-        url = (
-            "https://www.youtube.com/oembed?url=https%3A//www.youtube.com/watch%3Fv%3D"
-            f"{video_id}&format=json"
-        )
-        req = urllib.request.Request(url, headers={"User-Agent": "HCMusic/1.4"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            d = json.loads(r.read().decode("utf-8", "replace"))
-        titulo = d.get("title") or ""
-        autor = d.get("author_name") or ""
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        cancion = YTMusic().get_song(video_id) or {}
-        titulo = titulo or (cancion.get("title") or "")
-        duracion = cancion.get("duration_seconds")
-        if not autor:
-            artistas = cancion.get("artists") or []
-            if artistas:
-                autor = artistas[0].get("name") or ""
-    except Exception:  # noqa: BLE001
-        pass
-    meta = {"title": titulo, "author": autor, "duration": duracion}
-    _cache_set(clave, meta)
-    return meta
-
-
-def _consultas_soundcloud(meta: dict, video_id: str):
-    titulo = meta.get("title") or ""
-    autor = re.sub(r"\s*-\s*Topic\s*$", "", meta.get("author") or "", flags=re.IGNORECASE).strip()
-    titulo_sin_feat = re.sub(r"\(?\b(feat|ft|featuring)\b[^)]*\)?", " ", titulo, flags=re.IGNORECASE)
-    variantes = []
-    for q in (f"{titulo} {autor}", titulo, f"{autor} {titulo}", titulo_sin_feat):
-        q = re.sub(r"\s+", " ", q).strip()
-        if q and q not in variantes:
-            variantes.append(q)
-    return variantes or [video_id]
-
-
-def _puntaje_candidato(titulo: str, duracion, entrada: dict) -> float:
-    puntaje = _similitud(titulo, entrada.get("title") or "")
-    d = entrada.get("duration")
-    if duracion and d:
-        diferencia = abs(duracion - d)
-        puntaje += 0.35 * max(0.0, 1.0 - diferencia / max(30.0, duracion * 0.25))
-    # Penalizar vistas previas de 30 s cuando la canción dura más.
-    if duracion and duracion > 60 and (d or 0) < 40:
-        puntaje -= 0.6
-    return puntaje
-
-
-def _buscar_candidatos_soundcloud(meta: dict, video_id: str):
-    """Resultados de búsqueda "planos" (sin extraer cada pista, que puede fallar por DRM)."""
-    candidatos = []
-    vistos = set()
-    for consulta in _consultas_soundcloud(meta, video_id):
-        try:
-            with YoutubeDL({
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "extract_flat": True,
-                "socket_timeout": 20,
-            }) as ydl:
-                info = ydl.extract_info(f"scsearch10:{consulta}", download=False)
-        except Exception:  # noqa: BLE001
-            continue
-        for entrada in (info.get("entries") or []):
-            if not isinstance(entrada, dict):
-                continue
-            url = entrada.get("url") or entrada.get("webpage_url")
-            if not url or url in vistos:
-                continue
-            vistos.add(url)
-            candidatos.append(entrada)
-        if len(candidatos) >= 15:
-            break
-    return candidatos
-
-
-def _resolver_soundcloud(video_id: str, meta: dict):
-    """Devuelve el HLS completo de la mejor coincidencia en SoundCloud, o None."""
-    duracion = meta.get("duration")
-    titulo = meta.get("title") or ""
-    candidatos = _buscar_candidatos_soundcloud(meta, video_id)
-    candidatos.sort(key=lambda e: _puntaje_candidato(titulo, duracion, e), reverse=True)
-    for entrada in candidatos[:6]:
-        url_track = entrada.get("url") or entrada.get("webpage_url")
-        if not url_track:
-            continue
-        try:
-            info = _extraer_con_reintentos(url_track, False, {"format": "bestaudio/best"})
-            url = _url_hls(info)
-            if url:
-                return url
-        except Exception:  # noqa: BLE001
-            continue
-    return None
-
-
 def _resolver_stream(video_id: str, duracion: Optional[int] = None) -> dict:
     clave = f"stream:{video_id}"
     guardado = _cache_get(clave, _TTL_STREAM)
     if guardado:
         return guardado
-
-    meta = _meta_youtube(video_id)
-    if duracion and not meta.get("duration"):
-        meta = {**meta, "duration": duracion}
-        _cache_set(f"meta:{video_id}", meta)
 
     error_youtube = "YouTube no devolvió audio."
     try:
@@ -281,16 +124,6 @@ def _resolver_stream(video_id: str, duracion: Optional[int] = None) -> dict:
             return resultado
     except Exception as exc:  # noqa: BLE001
         error_youtube = str(exc)
-
-    # Respaldo: SoundCloud (audio completo por HLS; no suele aplicar el anti-bot de YouTube).
-    try:
-        url = _resolver_soundcloud(video_id, meta)
-        if url:
-            resultado = {"id": video_id, "stream_url": url, "source": "soundcloud"}
-            _cache_set(clave, resultado)
-            return resultado
-    except Exception:  # noqa: BLE001
-        pass
 
     raise ValueError(f"Error al resolver el flujo: {error_youtube}")
 
@@ -359,21 +192,11 @@ async def download(id: str):
         tmpdir = tempfile.mkdtemp(prefix="hcm_")
         salida = os.path.join(tmpdir, "%(title).120s.%(ext)s")
         try:
-            try:
-                info = _extraer_con_reintentos(
-                    f"https://www.youtube.com/watch?v={id}",
-                    True,
-                    {"format": "bestaudio[ext=m4a]/bestaudio/best", "outtmpl": salida},
-                )
-            except Exception:  # noqa: BLE001
-                url_sc = _resolver_soundcloud(id, _meta_youtube(id))
-                if not url_sc:
-                    raise ValueError("No se encontró la canción en SoundCloud.")
-                info = _extraer_con_reintentos(
-                    url_sc,
-                    True,
-                    {"format": "bestaudio/best", "outtmpl": salida},
-                )
+            info = _extraer_con_reintentos(
+                f"https://www.youtube.com/watch?v={id}",
+                True,
+                {"format": "bestaudio[ext=m4a]/bestaudio/best", "outtmpl": salida},
+            )
             archivos = [f for f in os.listdir(tmpdir) if not f.endswith(".part")]
             if not archivos:
                 raise ValueError("No se descargó ningún archivo.")
@@ -411,3 +234,48 @@ async def health():
         "cookies": bool(COOKIES_FILE and os.path.isfile(COOKIES_FILE)),
         "cache": len(_CACHE),
     }
+
+@app.get("/api/debug/youtube/{id}")
+async def debug_youtube(id: str):
+    def _run():
+        url = f"https://www.youtube.com/watch?v={id}"
+        configs = [
+            ("default", None, True),
+            ("default_sin_cookies", None, False),
+            ("tv", ["tv"], False),
+            ("tv_con_cookies", ["tv"], True),
+            ("tv_simply", ["tv_simply"], False),
+            ("ios", ["ios"], True),
+            ("ios_sin_cookies", ["ios"], False),
+            ("android", ["android"], True),
+            ("android_sin_cookies", ["android"], False),
+            ("android_vr", ["android_vr"], False),
+            ("mweb", ["mweb"], True),
+            ("web_embedded", ["web_embedded"], True),
+            ("web_safari", ["web_safari"], True),
+            ("web_safari_sin_cookies", ["web_safari"], False),
+        ]
+        salida = []
+        for nombre, clientes, cookies in configs:
+            opts = {
+                "format": "bestaudio/best", "quiet": True, "no_warnings": True,
+                "noplaylist": True, "socket_timeout": 15, "retries": 0,
+            }
+            if cookies and COOKIES_FILE and os.path.isfile(COOKIES_FILE):
+                opts["cookiefile"] = COOKIES_FILE
+            if clientes:
+                opts["extractor_args"] = {"youtube": {"player_client": clientes}}
+            try:
+                with YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                u = _url_audio(info)
+                salida.append({
+                    "cliente": nombre, "ok": bool(u),
+                    "formato": info.get("format_id"),
+                    "googlevideo": bool(u and "googlevideo" in u),
+                })
+            except Exception as exc:  # noqa: BLE001
+                salida.append({"cliente": nombre, "ok": False, "error": str(exc)[:160]})
+        return salida
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run)
