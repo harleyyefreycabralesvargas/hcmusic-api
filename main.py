@@ -28,6 +28,43 @@ if os.path.isfile(_COOKIES_SRC):
 else:
     COOKIES_FILE = None
 
+
+def _ydl_opts(extra: dict) -> dict:
+    opts = {
+        "format": "bestaudio/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+    opts.update(extra or {})
+    return opts
+
+
+# Clientes de YouTube a probar. El normal y, si YouTube pide "confirma que no eres un bot",
+# alternativas que a veces pasan sin cookies (TV, Safari móvil, web móvil).
+_CLIENTES = [None, ["tv"], ["web_safari"], ["mweb"]]
+
+
+def _extraer_con_reintentos(url: str, download: bool, extra: dict):
+    ultimo = None
+    for cliente in _CLIENTES:
+        opts = _ydl_opts(extra)
+        if cliente:
+            opts["extractor_args"] = {"youtube": {"player_client": cliente}}
+        try:
+            with YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=download)
+        except Exception as exc:  # noqa: BLE001
+            ultimo = exc
+            msg = str(exc)
+            # Solo merece la pena probar otro cliente si fue el chequeo anti-bot.
+            if "confirm you're not a bot" not in msg and "Sign in" not in msg:
+                break
+    raise ValueError(str(ultimo))
+
+
 # Modelo de respuesta del endpoint de búsqueda
 class SearchResult(BaseModel):
     id: str
@@ -78,30 +115,23 @@ async def search(query: str):
 async def stream(id: str):
     def _resolve():
         url_completa = f"https://www.youtube.com/watch?v={id}"
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-        }
-        if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
-            ydl_opts["cookiefile"] = COOKIES_FILE
         try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url_completa, download=False)
-                if info is None:
-                    raise ValueError("Contenido no encontrado o restringido.")
-                url = info.get("url")
-                if not url:
-                    formats = info.get("formats", [])
-                    audio_formats = [f for f in formats if f.get("vcodec") == "none"]
-                    if audio_formats:
-                        best = max(audio_formats, key=lambda f: f.get("abr", 0))
-                        url = best.get("url")
-                if not url:
-                    raise ValueError("No se encontró un flujo de audio para el contenido.")
-                return {"id": id, "stream_url": url}
-        except Exception as exc:
+            info = _extraer_con_reintentos(url_completa, False, {"format": "bestaudio/best"})
+            if info is None:
+                raise ValueError("Contenido no encontrado o restringido.")
+            url = info.get("url")
+            if not url:
+                formats = info.get("formats", [])
+                audio_formats = [f for f in formats if f.get("vcodec") == "none"]
+                if audio_formats:
+                    best = max(audio_formats, key=lambda f: f.get("abr", 0))
+                    url = best.get("url")
+            if not url:
+                raise ValueError("No se encontró un flujo de audio para el contenido.")
+            return {"id": id, "stream_url": url}
+        except ValueError as exc:
+            raise ValueError(f"Error al resolver el flujo: {exc}")
+        except Exception as exc:  # noqa: BLE001
             raise ValueError(f"Error al resolver el flujo: {exc}")
 
     loop = asyncio.get_running_loop()
@@ -118,18 +148,15 @@ async def download(id: str):
 
     def _download():
         tmpdir = tempfile.mkdtemp(prefix="hcm_")
-        ydl_opts = {
-            "format": "bestaudio[ext=m4a]/bestaudio/best",
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "outtmpl": os.path.join(tmpdir, "%(title).120s.%(ext)s"),
-        }
-        if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
-            ydl_opts["cookiefile"] = COOKIES_FILE
         try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"https://www.youtube.com/watch?v={id}", download=True)
+            info = _extraer_con_reintentos(
+                f"https://www.youtube.com/watch?v={id}",
+                True,
+                {
+                    "format": "bestaudio[ext=m4a]/bestaudio/best",
+                    "outtmpl": os.path.join(tmpdir, "%(title).120s.%(ext)s"),
+                },
+            )
             archivos = [f for f in os.listdir(tmpdir) if not f.endswith(".part")]
             if not archivos:
                 raise ValueError("No se descargó ningún archivo.")
