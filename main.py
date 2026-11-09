@@ -382,3 +382,37 @@ async def health():
         "cookies": bool(COOKIES_FILE and os.path.isfile(COOKIES_FILE)),
         "cache": len(_CACHE),
     }
+
+
+@app.get("/api/debug/soundcloud/{id}")
+async def debug_soundcloud(id: str):
+    """Diagnóstico temporal: estado de la búsqueda de respaldo en SoundCloud."""
+
+    def _run():
+        meta = _meta_youtube(id)
+        out = {"meta": meta, "consultas": [], "entradas": []}
+        for consulta in _consultas_soundcloud(meta, id):
+            try:
+                info = _extraer_con_reintentos(
+                    f"scsearch10:{consulta}", False, {"format": "bestaudio/best"}
+                )
+            except Exception as exc:  # noqa: BLE001
+                out["consultas"].append({"q": consulta, "error": str(exc)[:250]})
+                continue
+            entradas = info.get("entries") if isinstance(info, dict) else None
+            out["consultas"].append({"q": consulta, "entries": len(entradas or [])})
+            for e in (entradas or [])[:6]:
+                out["entradas"].append({
+                    "title": e.get("title"),
+                    "duration": e.get("duration"),
+                    "formats": [
+                        (f.get("format_id"), f.get("protocol"), bool(f.get("url")))
+                        for f in (e.get("formats") or [])
+                    ],
+                    "hls": bool(_url_hls(e)),
+                })
+            break
+        return out
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run)
