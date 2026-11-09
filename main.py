@@ -1,8 +1,10 @@
 import asyncio
+import json
 import os
 import re
 import shutil
 import tempfile
+import urllib.request
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -42,9 +44,39 @@ def _ydl_opts(extra: dict) -> dict:
     return opts
 
 
-# Clientes de YouTube a probar. El normal y, si YouTube pide "confirma que no eres un bot",
-# alternativas que a veces pasan sin cookies (TV, Safari móvil, web móvil).
-_CLIENTES = [None, ["tv"], ["web_safari"], ["mweb"]]
+# Clientes de YouTube a probar. El normal y alternativas que a veces pasan sin cookies.
+# Ojo: no usar "tv" junto con cookies (puede invalidar la sesión de la cuenta).
+_CLIENTES = [None, ["web_safari"], ["mweb"], ["android_vr"], ["web_embedded"]]
+
+
+def _url_audio(info):
+    if not info:
+        return None
+    url = info.get("url")
+    if url:
+        return url
+    formats = [f for f in (info.get("formats") or []) if f.get("url")]
+    audio = [f for f in formats if f.get("vcodec") == "none"]
+    if audio:
+        return max(audio, key=lambda f: f.get("abr") or 0).get("url")
+    return formats[-1].get("url") if formats else None
+
+
+def _titulo_y_autor_youtube(video_id: str):
+    """Título y autor del video sin descargarlo (oEmbed no aplica el anti-bot)."""
+    try:
+        url = f"https://www.youtube.com/oembed?url=https%3A//www.youtube.com/watch%3Fv%3D{video_id}&format=json"
+        req = urllib.request.Request(url, headers={"User-Agent": "HCMusic/1.4"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        return (d.get("title") or ""), (d.get("author_name") or "")
+    except Exception:
+        return "", ""
+
+
+def _consulta_respaldo(video_id: str) -> str:
+    titulo, autor = _titulo_y_autor_youtube(video_id)
+    return " ".join(p for p in (titulo, autor) if p).strip() or video_id
 
 
 def _extraer_con_reintentos(url: str, download: bool, extra: dict):
@@ -115,24 +147,32 @@ async def search(query: str):
 async def stream(id: str):
     def _resolve():
         url_completa = f"https://www.youtube.com/watch?v={id}"
+        yt_error = None
         try:
             info = _extraer_con_reintentos(url_completa, False, {"format": "bestaudio/best"})
-            if info is None:
-                raise ValueError("Contenido no encontrado o restringido.")
-            url = info.get("url")
-            if not url:
-                formats = info.get("formats", [])
-                audio_formats = [f for f in formats if f.get("vcodec") == "none"]
-                if audio_formats:
-                    best = max(audio_formats, key=lambda f: f.get("abr", 0))
-                    url = best.get("url")
-            if not url:
-                raise ValueError("No se encontró un flujo de audio para el contenido.")
-            return {"id": id, "stream_url": url}
-        except ValueError as exc:
-            raise ValueError(f"Error al resolver el flujo: {exc}")
+            url = _url_audio(info)
+            if url:
+                return {"id": id, "stream_url": url, "source": "youtube"}
+            yt_error = "No se encontró un flujo de audio para el contenido."
         except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"Error al resolver el flujo: {exc}")
+            yt_error = str(exc)
+
+        # Respaldo: buscar la misma canción en SoundCloud (no suele aplicar el anti-bot de YouTube).
+        try:
+            info = _extraer_con_reintentos(
+                f"scsearch1:{_consulta_respaldo(id)}",
+                False,
+                {"format": "http_mp3_128/http_mp3/bestaudio/best"},
+            )
+            if isinstance(info, dict) and info.get("entries"):
+                info = info["entries"][0]
+            url = _url_audio(info)
+            if url:
+                return {"id": id, "stream_url": url, "source": "soundcloud"}
+        except Exception:  # noqa: BLE001
+            pass
+
+        raise ValueError(f"Error al resolver el flujo: {yt_error}")
 
     loop = asyncio.get_running_loop()
     try:
@@ -148,15 +188,20 @@ async def download(id: str):
 
     def _download():
         tmpdir = tempfile.mkdtemp(prefix="hcm_")
+        salida = os.path.join(tmpdir, "%(title).120s.%(ext)s")
         try:
-            info = _extraer_con_reintentos(
-                f"https://www.youtube.com/watch?v={id}",
-                True,
-                {
-                    "format": "bestaudio[ext=m4a]/bestaudio/best",
-                    "outtmpl": os.path.join(tmpdir, "%(title).120s.%(ext)s"),
-                },
-            )
+            try:
+                info = _extraer_con_reintentos(
+                    f"https://www.youtube.com/watch?v={id}",
+                    True,
+                    {"format": "bestaudio[ext=m4a]/bestaudio/best", "outtmpl": salida},
+                )
+            except Exception:  # noqa: BLE001
+                info = _extraer_con_reintentos(
+                    f"scsearch1:{_consulta_respaldo(id)}",
+                    True,
+                    {"format": "http_mp3_128/http_mp3/bestaudio/best", "outtmpl": salida},
+                )
             archivos = [f for f in os.listdir(tmpdir) if not f.endswith(".part")]
             if not archivos:
                 raise ValueError("No se descargó ningún archivo.")
