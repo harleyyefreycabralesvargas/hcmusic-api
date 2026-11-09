@@ -44,9 +44,8 @@ def _ydl_opts(extra: dict) -> dict:
     return opts
 
 
-# Clientes de YouTube a probar. El normal y alternativas que a veces pasan sin cookies.
-# Ojo: no usar "tv" junto con cookies (puede invalidar la sesión de la cuenta).
-_CLIENTES = [None, ["web_safari"], ["mweb"], ["android_vr"], ["web_embedded"]]
+# Clientes de YouTube a probar. Ojo: no usar "tv" junto con cookies (puede invalidar la sesión).
+_CLIENTES = [None, ["web_safari"]]
 
 
 def _url_audio(info):
@@ -74,9 +73,38 @@ def _titulo_y_autor_youtube(video_id: str):
         return "", ""
 
 
-def _consulta_respaldo(video_id: str) -> str:
+def _consulta_respaldo(video_id: str):
+    """Variantes de búsqueda para SoundCloud (el autor de YouTube suele terminar en '- Topic')."""
     titulo, autor = _titulo_y_autor_youtube(video_id)
-    return " ".join(p for p in (titulo, autor) if p).strip() or video_id
+    autor = re.sub(r"\s*-\s*Topic\s*$", "", autor, flags=re.IGNORECASE).strip()
+    variantes = []
+    for q in (f"{titulo} {autor}", titulo, f"{autor} {titulo}"):
+        q = re.sub(r"\s+", " ", q).strip()
+        if q and q not in variantes:
+            variantes.append(q)
+    return variantes or [video_id]
+
+
+def _resolver_soundcloud(video_id: str):
+    """Devuelve una URL de audio directa de SoundCloud para la canción, o None."""
+    for consulta in _consulta_respaldo(video_id):
+        try:
+            info = _extraer_con_reintentos(
+                f"scsearch5:{consulta}",
+                False,
+                {"format": "http_mp3_128/http_mp3/bestaudio/best"},
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        entradas = info.get("entries") if isinstance(info, dict) else None
+        for entrada in entradas or []:
+            url = _url_audio(entrada)
+            if url:
+                return url
+        url = _url_audio(info)
+        if url:
+            return url
+    return None
 
 
 def _extraer_con_reintentos(url: str, download: bool, extra: dict):
@@ -159,14 +187,7 @@ async def stream(id: str):
 
         # Respaldo: buscar la misma canción en SoundCloud (no suele aplicar el anti-bot de YouTube).
         try:
-            info = _extraer_con_reintentos(
-                f"scsearch1:{_consulta_respaldo(id)}",
-                False,
-                {"format": "http_mp3_128/http_mp3/bestaudio/best"},
-            )
-            if isinstance(info, dict) and info.get("entries"):
-                info = info["entries"][0]
-            url = _url_audio(info)
+            url = _resolver_soundcloud(id)
             if url:
                 return {"id": id, "stream_url": url, "source": "soundcloud"}
         except Exception:  # noqa: BLE001
@@ -197,10 +218,13 @@ async def download(id: str):
                     {"format": "bestaudio[ext=m4a]/bestaudio/best", "outtmpl": salida},
                 )
             except Exception:  # noqa: BLE001
+                url_sc = _resolver_soundcloud(id)
+                if not url_sc:
+                    raise ValueError("No se encontró la canción en SoundCloud.")
                 info = _extraer_con_reintentos(
-                    f"scsearch1:{_consulta_respaldo(id)}",
+                    url_sc,
                     True,
-                    {"format": "http_mp3_128/http_mp3/bestaudio/best", "outtmpl": salida},
+                    {"format": "bestaudio/best", "outtmpl": salida},
                 )
             archivos = [f for f in os.listdir(tmpdir) if not f.endswith(".part")]
             if not archivos:
