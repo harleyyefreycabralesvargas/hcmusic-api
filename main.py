@@ -197,36 +197,65 @@ def _consultas_soundcloud(meta: dict, video_id: str):
     return variantes or [video_id]
 
 
-def _resolver_soundcloud(video_id: str, meta: dict):
-    """Busca la canción en SoundCloud y devuelve su HLS completo (mejor coincidencia)."""
-    duracion = meta.get("duration")
-    titulo = meta.get("title") or ""
-    mejor_url = None
-    mejor_puntaje = -1.0
+def _puntaje_candidato(titulo: str, duracion, entrada: dict) -> float:
+    puntaje = _similitud(titulo, entrada.get("title") or "")
+    d = entrada.get("duration")
+    if duracion and d:
+        diferencia = abs(duracion - d)
+        puntaje += 0.35 * max(0.0, 1.0 - diferencia / max(30.0, duracion * 0.25))
+    # Penalizar vistas previas de 30 s cuando la canción dura más.
+    if duracion and duracion > 60 and (d or 0) < 40:
+        puntaje -= 0.6
+    return puntaje
+
+
+def _buscar_candidatos_soundcloud(meta: dict, video_id: str):
+    """Resultados de búsqueda "planos" (sin extraer cada pista, que puede fallar por DRM)."""
+    candidatos = []
+    vistos = set()
     for consulta in _consultas_soundcloud(meta, video_id):
         try:
-            info = _extraer_con_reintentos(
-                f"scsearch10:{consulta}", False, {"format": "bestaudio/best"}
-            )
+            with YoutubeDL({
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "extract_flat": True,
+                "socket_timeout": 20,
+            }) as ydl:
+                info = ydl.extract_info(f"scsearch10:{consulta}", download=False)
         except Exception:  # noqa: BLE001
             continue
-        entradas = info.get("entries") if isinstance(info, dict) else None
-        for entrada in entradas or []:
+        for entrada in (info.get("entries") or []):
             if not isinstance(entrada, dict):
                 continue
-            url = _url_hls(entrada)
-            if not url:
+            url = entrada.get("url") or entrada.get("webpage_url")
+            if not url or url in vistos:
                 continue
-            puntaje = _similitud(titulo, entrada.get("title") or "")
-            d = entrada.get("duration")
-            if duracion and d:
-                diferencia = abs(duracion - d)
-                puntaje += 0.35 * max(0.0, 1.0 - diferencia / max(30.0, duracion * 0.25))
-            if puntaje > mejor_puntaje:
-                mejor_puntaje, mejor_url = puntaje, url
-        if mejor_puntaje >= 0.9:
+            vistos.add(url)
+            candidatos.append(entrada)
+        if len(candidatos) >= 15:
             break
-    return mejor_url
+    return candidatos
+
+
+def _resolver_soundcloud(video_id: str, meta: dict):
+    """Devuelve el HLS completo de la mejor coincidencia en SoundCloud, o None."""
+    duracion = meta.get("duration")
+    titulo = meta.get("title") or ""
+    candidatos = _buscar_candidatos_soundcloud(meta, video_id)
+    candidatos.sort(key=lambda e: _puntaje_candidato(titulo, duracion, e), reverse=True)
+    for entrada in candidatos[:6]:
+        url_track = entrada.get("url") or entrada.get("webpage_url")
+        if not url_track:
+            continue
+        try:
+            info = _extraer_con_reintentos(url_track, False, {"format": "bestaudio/best"})
+            url = _url_hls(info)
+            if url:
+                return url
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def _resolver_stream(video_id: str, duracion: Optional[int] = None) -> dict:
@@ -390,28 +419,24 @@ async def debug_soundcloud(id: str):
 
     def _run():
         meta = _meta_youtube(id)
-        out = {"meta": meta, "consultas": [], "entradas": []}
-        for consulta in _consultas_soundcloud(meta, id):
+        titulo = meta.get("title") or ""
+        duracion = meta.get("duration")
+        candidatos = _buscar_candidatos_soundcloud(meta, id)
+        candidatos.sort(key=lambda e: _puntaje_candidato(titulo, duracion, e), reverse=True)
+        out = {"meta": meta, "candidatos": []}
+        for e in candidatos[:6]:
+            url_track = e.get("url") or e.get("webpage_url")
+            prueba = {
+                "title": e.get("title"),
+                "duration": e.get("duration"),
+                "puntaje": round(_puntaje_candidato(titulo, duracion, e), 3),
+            }
             try:
-                info = _extraer_con_reintentos(
-                    f"scsearch10:{consulta}", False, {"format": "bestaudio/best"}
-                )
+                info = _extraer_con_reintentos(url_track, False, {"format": "bestaudio/best"})
+                prueba["hls"] = bool(_url_hls(info))
             except Exception as exc:  # noqa: BLE001
-                out["consultas"].append({"q": consulta, "error": str(exc)[:250]})
-                continue
-            entradas = info.get("entries") if isinstance(info, dict) else None
-            out["consultas"].append({"q": consulta, "entries": len(entradas or [])})
-            for e in (entradas or [])[:6]:
-                out["entradas"].append({
-                    "title": e.get("title"),
-                    "duration": e.get("duration"),
-                    "formats": [
-                        (f.get("format_id"), f.get("protocol"), bool(f.get("url")))
-                        for f in (e.get("formats") or [])
-                    ],
-                    "hls": bool(_url_hls(e)),
-                })
-            break
+                prueba["error"] = str(exc)[:150]
+            out["candidatos"].append(prueba)
         return out
 
     loop = asyncio.get_running_loop()
